@@ -136,6 +136,14 @@ async fn python_answers_every_request_when_it_routes_with_another_strategy(
     "router_settings: {enable_tag_filtering: true}",
     "router_settings.enable_tag_filtering"
 )]
+#[case::deployment_slots(
+    "model_list: [{model_name: a, litellm_params: {model: openai/a, max_parallel_requests: 2}}]",
+    "model_list.litellm_params.max_parallel_requests"
+)]
+#[case::default_slots(
+    "router_settings: {default_max_parallel_requests: 2}",
+    "router_settings.default_max_parallel_requests"
+)]
 #[case::section("guardrails: [{guardrail_name: pii}]", "guardrails")]
 #[case::key_the_gateway_does_not_know(
     "general_settings: {alerting: [slack]}",

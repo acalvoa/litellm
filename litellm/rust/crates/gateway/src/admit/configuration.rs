@@ -3,16 +3,18 @@ use std::collections::BTreeMap;
 use litellm_config::{
     AdditionalFields, Config, GeneralSettings, LiteLlmSettings, Object, RouterSettings, Value,
 };
+use litellm_router_core::{ConfigError, Router, RouterConfig, Unsupported};
 
 use super::{Refused, UserCode};
-
-const SIMPLE_SHUFFLE: &str = "simple-shuffle";
+use crate::host::FACTS;
 
 /// Whether the native app runs `config` the way the Python proxy does. A setting is honored when
 /// the native app reads it, or when it only shapes routes the gateway never admits.
 pub(super) fn honored(config: &Config) -> Result<(), Refused> {
     user_code(config).map_or(Ok(()), |kind| Err(Refused::UserCode(kind)))?;
-    routing_strategy(&config.router_settings)?;
+    routing(&config.router_settings)?;
+    crate::boot::slot_limit(config)
+        .map_or(Ok(()), |setting| Err(Refused::Setting(setting.into())))?;
     unhonored(config).map_or(Ok(()), |setting| Err(Refused::Setting(setting)))
 }
 
@@ -57,22 +59,30 @@ fn is_import_path(callback: &Value) -> bool {
     callback.as_str().is_some_and(|name| name.contains('.'))
 }
 
-fn routing_strategy(router: &RouterSettings) -> Result<(), Refused> {
-    let of_groups = router.routing_groups.iter().flatten().map(|group| {
-        group
-            .get("routing_strategy")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-    });
-    router
-        .routing_strategy
-        .as_deref()
-        .into_iter()
-        .chain(of_groups)
-        .find(|strategy| *strategy != SIMPLE_SHUFFLE)
-        .map_or(Ok(()), |strategy| {
-            Err(Refused::RoutingStrategy(strategy.into()))
-        })
+/// router-core reads `router_settings`, and refuses the ones the native host cannot route by.
+fn routing(settings: &RouterSettings) -> Result<(), Refused> {
+    let named = |setting: &str| Refused::Setting(format!("router_settings.{setting}").into());
+    RouterConfig::from_settings(settings)
+        .and_then(|(config, dynamic)| Router::new(config, dynamic, FACTS))
+        .map_err(|refused| match refused {
+            ConfigError::Unsupported(Unsupported::Strategy(strategy)) => {
+                Refused::RoutingStrategy(strategy.to_string().into())
+            }
+            ConfigError::Unsupported(Unsupported::Plugin(_)) => {
+                Refused::UserCode(UserCode::RouterPlugin)
+            }
+            ConfigError::Unsupported(Unsupported::Setting { setting, .. })
+            | ConfigError::Setting { setting, .. } => named(setting),
+            ConfigError::Unsupported(Unsupported::Op { .. })
+            | ConfigError::InvalidDeployment { .. }
+            | ConfigError::DuplicateId { .. }
+            | ConfigError::Removal(_) => Refused::Setting("router_settings".into()),
+        })?;
+    settings
+        .additional_fields
+        .keys()
+        .next()
+        .map_or(Ok(()), |key| Err(named(key)))
 }
 
 trait IsSet {
@@ -131,7 +141,7 @@ fn unhonored(config: &Config) -> Option<Box<str>> {
     let Config {
         model_list: _,
         general_settings,
-        router_settings,
+        router_settings: _,
         litellm_settings,
         environment_variables: _,
         include: _,
@@ -156,7 +166,6 @@ fn unhonored(config: &Config) -> Option<Box<str>> {
         additional_fields,
     } = config;
     general(general_settings)
-        .or_else(|| router(router_settings))
         .or_else(|| litellm(litellm_settings))
         .or_else(|| {
             first_set!(
@@ -280,45 +289,6 @@ fn general(settings: &GeneralSettings) -> Option<Box<str>> {
         ]
     )
     .or_else(|| unknown("general_settings.", additional_fields))
-}
-
-fn router(settings: &RouterSettings) -> Option<Box<str>> {
-    let RouterSettings {
-        routing_strategy: _,
-        routing_groups: _,
-        retry_policy: _,
-        model_group_retry_policy: _,
-        allowed_fails: _,
-        cooldown_time: _,
-        num_retries: _,
-        timeout: _,
-        retry_after: _,
-        fallbacks: _,
-        context_window_fallbacks: _,
-        routing_strategy_args,
-        model_group_affinity_config,
-        max_retries,
-        model_group_alias,
-        enable_tag_filtering,
-        weights,
-        tag_routing_prefix,
-        optional_pre_call_checks,
-        additional_fields,
-    } = settings;
-    first_set!(
-        "router_settings.",
-        [
-            routing_strategy_args,
-            model_group_affinity_config,
-            max_retries,
-            model_group_alias,
-            enable_tag_filtering,
-            weights,
-            tag_routing_prefix,
-            optional_pre_call_checks,
-        ]
-    )
-    .or_else(|| unknown("router_settings.", additional_fields))
 }
 
 fn litellm(settings: &LiteLlmSettings) -> Option<Box<str>> {
